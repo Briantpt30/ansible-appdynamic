@@ -1,0 +1,59 @@
+---
+- name: Deploy AppDynamics Agent
+  hosts: all
+  become: yes
+  vars:
+    # Specify the path where the AppDynamics agent will be deployed
+    appdynamics_path: "/opt/AppDynamics"
+
+  tasks:
+    - name: Retrieve OAuth token
+      uri:
+        url: "https://identity.msrv.saas.appdynamics.com/v2.0/oauth/token"
+        method: POST
+        body_format: json
+        headers:
+          Content-Type: "application/x-www-form-urlencoded"
+        body: "grant_type=client_credentials&client_id={{ appdynamics_client_id }}&client_secret={{ appdynamics_client_secret }}&scope=download"
+        validate_certs: no
+      register: oauth_response
+
+    - name: Determine agent version to download
+      set_fact:
+        appdynamics_machine_agent_version: "{{ appdynamics_default_agent_version }}"
+      when: appdynamics_agent_version is not defined
+      vars:
+        appdynamics_default_agent_version: "latest"
+
+    - name: Download AppDynamics agent
+      get_url:
+        url: "https://download.appdynamics.com/download/prox/download-file/machine-bundle/{{ appdynamics_machine_agent_version }}/MachineAgent-{{ appdynamics_machine_agent_version }}.zip"
+        dest: "/tmp/MachineAgent-{{ appdynamics_machine_agent_version }}.zip"
+        headers:
+          Authorization: "Bearer {{ oauth_response.json.access_token }}"
+      when: appdynamics_machine_agent_version != "latest"
+
+    - name: Extract AppDynamics agent
+      ansible.builtin.unarchive:
+        src: "/tmp/MachineAgent-{{ appdynamics_machine_agent_version }}.zip"
+        dest: "{{ appdynamics_path }}"
+        remote_src: yes
+
+    - name: Create symlink
+      ansible.builtin.file:
+        src: "{{ appdynamics_path }}/MachineAgent-{{ appdynamics_machine_agent_version }}"
+        dest: "{{ appdynamics_path }}/MachineAgent"
+        state: link
+
+    - name: Check if controller-info needs updating
+      ansible.builtin.shell: cat "{{ appdynamics_path }}/MachineAgent/conf/controller-info.xml"
+      register: controller_info_content
+      changed_when: false
+
+    - name: Update controller-info
+      template:
+        src: controller-info.xml.j2
+        dest: "{{ appdynamics_path }}/MachineAgent/conf/controller-info.xml"
+      when: controller_info_content.stdout.find('<controller-host>DEFAULT_VALUE</controller-host>') != -1 or
+            controller_info_content.stdout.find('<controller-port>443</controller-port>') != -1 or
+            controller_info_content.stdout.find('<application-name>DEFAULT_VALUE</application-name>') != -1
